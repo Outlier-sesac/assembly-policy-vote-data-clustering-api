@@ -1,22 +1,27 @@
+import os
+
 import pyodbc
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+
 
 def get_db_connection():
+    # 접속 정보는 환경변수에서 읽는다 (분석 페이지와 같은 이름)
     return pyodbc.connect(
-        "DRIVER={ODBC Driver 17 for SQL Server};"
-        "SERVER=outliers.database.windows.net;"
-        "DATABASE=outliers_database;"
-        "UID=outliers_admin;"
-        "PWD=ZBofe3XjbLeVpr7HfPah;"
+        f"DRIVER={{{os.getenv('DB_DRIVER', 'ODBC Driver 17 for SQL Server')}}};"
+        f"SERVER={os.environ['DB_HOST']};"
+        f"DATABASE={os.environ['DB_NAME']};"
+        f"UID={os.environ['DB_USER']};"
+        f"PWD={os.environ['DB_PASSWORD']};"
         "TrustServerCertificate=yes;"
     )
 
-def run_clustering_from_db():
+
+def fetch_votes():
     query = """
-    SELECT 
+    SELECT
         ar.MEMBER_NO,
         ar.HG_NM,
         ar.POLY_NM,
@@ -25,11 +30,14 @@ def run_clustering_from_db():
     FROM assembly_plenary_session_vote ar
     WHERE ar.RESULT_VOTE_MOD IS NOT NULL
     """
-
     conn = get_db_connection()
-    df = pd.read_sql(query, conn)
-    conn.close()
+    try:
+        return pd.read_sql(query, conn)
+    finally:
+        conn.close()
 
+
+def cluster_members(df):
     # 피벗 테이블 생성
     vote_matrix = df.pivot_table(
         index='MEMBER_NO',
@@ -49,12 +57,12 @@ def run_clustering_from_db():
     pca = PCA(n_components=2)
     coordinates = pca.fit_transform(vote_matrix_encoded)
 
-    # 좌표 정규화 (0~1 범위로)
-    scaler = MinMaxScaler()
+    # 좌표 정규화: 통계 페이지가 -1~1 범위를 기대한다
+    scaler = MinMaxScaler(feature_range=(-1, 1))
     coordinates_scaled = scaler.fit_transform(coordinates)
 
     # 의원 정보
-    member_info = df[['MEMBER_NO', 'HG_NM', 'POLY_NM']].drop_duplicates().set_index('MEMBER_NO')
+    member_info = df[['MEMBER_NO', 'HG_NM', 'POLY_NM']].drop_duplicates('MEMBER_NO').set_index('MEMBER_NO')
 
     results = []
     for i, member_no in enumerate(vote_matrix.index):
@@ -64,7 +72,11 @@ def run_clustering_from_db():
             "member_name": member['HG_NM'],
             "party": member['POLY_NM'],
             "cluster": int(clusters[i]),
-            "coordinates": [float(coordinates[i][0]), float(coordinates[i][1])],
+            "coordinates": [float(coordinates_scaled[i][0]), float(coordinates_scaled[i][1])],
             "similarity": 0.0
         })
     return results
+
+
+def run_clustering_from_db():
+    return cluster_members(fetch_votes())
